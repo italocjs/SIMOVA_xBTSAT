@@ -1,0 +1,475 @@
+/**
+ * @file main.h
+ * @brief main.cpp. Codigo base para uso da placa SimovaMPA.
+ */
+
+//=========================== CONFIGURAÇÕES DO MPA =============================
+
+int debug = 3; // 1 = Erro | 2 = Erro, Debug_Source | 3 = Erro, Debug_Source, Debug_MPA
+//#define SUPORTE_LCD_I2C_SSD1306       //Ativa suporte ao LCD, incluindo LIB e fazendo o setup do LCD
+//#define MODO_TESTADOR false           //Se definido ira ativar a tela de debug (precisa do LCD ligado) e ira tocar um BIP ao apertar qualquer input
+//#define BEACON_ADVERTISING            //Se ativado, irá transmitir no formato Ibeacon, com a MAJOR sendo 555 e MINOR sendo o ID do Marte
+#define CHECK_MOTOR_LIGADO            //Checa se o motor está ligado (precisa incluir void Logica_Verificar_motor() em algum lugar no loop)
+//=========================== Configurações do VIRLOC ==========================
+#define CT_Corte_Valido 3             //Contador utilizado para cortes validos (pensando em operação florestal)
+#define CT_Corte_invalido 20          //Contador utilizado para cortes invalidos (pensando em operação florestal)
+#define FLAG_Motor_Ligado 2           //Flag setada pelo proprio virloc, para indicar motor ligado ou não (usa RPM como referencia)
+#define Flag_TTS_Eucalipto_Cortado 10 //Flag a ser setada pelo MPA para que o VIRLOC dispare um TTS para o celular.
+#define delay_entre_mensagens 300     // Estava perdendo mensagens, precisa ter um delay minimo pra não ter problemas, 300 funciona ok
+extern bool Serial2InUse;             //Variavel que monitora se o serial está em uso, é necessario devido ao RTOS e multitasking
+
+//=========================== Variaveis globais ================================
+
+char MARTE_ID_ASCII[5];
+bool updating = false;
+int CT03_VALUE = -1;
+int CT20_VALUE = -1;
+int STATUS_Flag_Motor_Ligado = -1;
+
+//=========================== Inclusão de bibliotecas =========================
+#include "MPA Library\MPA.h"        //Biblioteca de abstração entre MPA e código de aplicação
+#include "MPA Library\wifi_stuff.h" //Coloquei em um arquivo separado para não poluir, tem um zilhao de linha
+#include "MPA Library\beacon.h"     //Biblioteca do Beacon -  Talvez seja legal colocar dentro da lib MPA
+#include "Preferences.h"            //Biblioteca para salvar dados na SPIFFS - Tentar mover pra lib MPA
+
+
+//Rotina de Inclusão do LCD
+#ifdef SUPORTE_LCD_I2C_SSD1306
+  #include <Wire.h>
+  #include <SSD1306Wire.h>
+  SSD1306Wire display(0x3c, pin_SDA, pin_SCL);
+
+  //Definição de posições de pixel na linha Y no LCD
+  #define lcd_title 0
+  #define lcd_line1 15
+  #define lcd_line2 25
+  #define lcd_line3 35
+  #define lcd_line4 45
+
+  void better_clear()
+{
+  display.clear();
+  display.display();
+}
+
+void setup_lcd() 
+{
+  display.init();
+  display.flipScreenVertically();
+  delay(100);
+  better_clear();
+  display.clear();
+  display.setColor(WHITE);
+  display.setFont(ArialMT_Plain_10);
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.drawString(64, lcd_title, "SimovaMPA");
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.drawString(64, lcd_line1, "");
+  display.drawString(64, lcd_line2, "Modulo de debug");
+  display.drawString(64, lcd_line3, "");
+  display.drawString(64, lcd_line4, "github/italocjs");
+  display.display();
+  delay(3000);
+}
+
+void screen_DEBUG() 
+{
+  char btname[15];
+  snprintf(btname, sizeof(btname), "MPA_%s", MARTE_ID_ASCII);
+
+  //TITULO
+  display.clear();
+  display.setColor(WHITE);
+  display.setFont(ArialMT_Plain_10);
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  char small_buffer[30];
+  snprintf(small_buffer, sizeof(small_buffer), "BT SSID: %s", btname);
+  display.drawString(64, lcd_title, small_buffer);
+
+  display.setTextAlignment(TEXT_ALIGN_LEFT);
+  //linha 1
+  snprintf(small_buffer, sizeof(small_buffer), "INPUT: %d %d %d %d %d", !current_input_state[1], !current_input_state[2], !current_input_state[3], !current_input_state[4], !current_input_state[5]);
+  display.drawString(0, lcd_line1, small_buffer);
+//linha 2
+  snprintf(small_buffer, sizeof(small_buffer), "VIRLOC ID: %s", MARTE_ID_ASCII);
+  display.drawString(0, lcd_line2, small_buffer);
+  //linha 3
+  snprintf(small_buffer, sizeof(small_buffer), "CT03: %d CT20: %d", CT03_VALUE, CT20_VALUE);
+  display.drawString(0, lcd_line3, small_buffer);
+  //linha 4
+  String ipaddress = WiFi.softAPIP().toString();
+  snprintf(small_buffer, sizeof(small_buffer), "IP: %s", ipaddress);
+  display.drawString(0, lcd_line4, small_buffer);
+  display.display();
+}
+
+#endif
+
+
+TaskHandle_t Task3_monitorar_motor; // Esse handle não funciona se estiver em outro contexto, utilizei a variavel booleana "Serial2InUse"
+// portMUX_TYPE myMutex2 = portMUX_INITIALIZER_UNLOCKED;
+void Task3_monitorar_motor_code(void *pvParameters)
+{
+  Serial.print("Task3 running on core ");
+  Serial.println(xPortGetCoreID());
+
+  for (;;)
+  {
+    vTaskDelay(30000 / portTICK_PERIOD_MS); // consulta mais rapido para nao perder cortes
+
+    // if (Serial2InUse == false)
+    //   {
+    //     Serial2InUse = true;
+    //     STATUS_Flag_Motor_Ligado = check_flag(FLAG_Motor_Ligado, MARTE_ID_ASCII);
+    //     if (STATUS_Flag_Motor_Ligado == 1)
+    //     {
+    //       vTaskDelay(60000 / portTICK_PERIOD_MS);
+    //     }
+    //     else
+    //     {
+    //       vTaskDelay(30000 / portTICK_PERIOD_MS); // consulta mais rapido para nao perder cortes
+    //     }
+    //     Serial2InUse = false;
+    //   }
+  }
+}
+
+// ============================WEB OTA =======================
+
+
+/* Rotina de setup, roda apenas uma vez */
+void setup(void)
+{
+  MPA_Serial_SETUP();
+  Serial.print("\033[96m ====  INICIO DO BOOT ==== \n\n");
+  MPA_Setup(); /* Configura a MPA Library */
+  #ifdef BEACON_ADVERTISING
+  ble_setup(MARTE_ID_ASCII);
+  #endif
+
+  #ifdef SUPORTE_LCD_I2C_SSD1306
+  setup_lcd();
+  #endif
+  
+  setup_WIFI_OTA(); /* Configura o WIFI e o OTA, deve ser chamado depois de configurar o MPA */
+  Serial.print("\nObtendo valores dos CT's \n");
+  //Obtem os valores iniciais dos CTS,  precisa melhorar isso, talvez criar uma array de 100-200 cts e mapear a primeira vez que a funcao addct ou setct for chamada,
+  CT03_VALUE = GET_CT_VALUE(03, MARTE_ID_ASCII);
+  CT20_VALUE = GET_CT_VALUE(20, MARTE_ID_ASCII);
+  Serial.print(" ====  FIM DO BOOT ==== \033[0m\n\n");
+}
+
+/**
+ * Monitora o pino (int pino) por até x milissegundos (int timeout), retorna -1 caso o timeout seja acionado, e 1 caso o pino tenha sido ativado.
+ *
+ * @param pino Pino a ser monitorado.
+ * @param timeout Tempo maximo (milissegundos) para aguardar
+ * @param debug OPCIONAL, true printa mensagens de debug
+ * @return 1 caso pino ativado, -1 caso timeout extrapolado.
+ */
+int wait_for_signal(int pino, int timeout, bool debug = false)
+{
+  int current_time = 0;
+   while (!(current_input_state[pino] == 0 || (current_time >= timeout)))
+    {
+      current_time++;
+      //delay(1);
+      vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+      if (current_time >= timeout)
+      {
+        if (debug == true)
+        {
+          char buf[40];
+          snprintf(buf, sizeof(buf), "waitforsignal pin %d TIMEOUT", pino);
+          Serial.println(buf);
+        }
+        return -1;
+      }
+      else
+      {
+        if (debug == true)
+        {
+          char buf[40];
+          snprintf(buf, sizeof(buf), "waitforsignal pin %d TRIGGERED", pino);
+          Serial.println(buf);
+        }
+        return 1;
+      }
+}
+
+
+/**
+ * Caso ativo (bool print_core_once4) printa o core que está sendo executada a tarefa em que for chamada.
+ * @param func Deve ser obrigatoriamente __func__
+ * @param already_printed OPCIONAL: Se referenciado a uma BOOL externa a função, printa apenas uma vez por boot
+ * @return true após printar.
+ * Exemplos de uso:
+ *  bool print_once = print_current_core(__func__, print_once);   // Printa apenas uma vez qual core esta executando
+ *  print_current_core(__func__); //Printa o core atual todas as vezes que for chamado
+ */
+bool print_current_core(const char *func, bool print_once = false)
+{
+ if (print_once == false) // printa o numero do core que esta rodando somente uma vez
+  {
+    char buf[100]; //100 caracteres para segurar até as funções com nome grande
+    snprintf(buf, sizeof(buf), "\033[92m%s executando no core %d\033[0m",func, xPortGetCoreID());
+    Smart_Print(buf);
+    //Debugln(buf, Debug_MPA, __func__, __LINE__);
+    print_once = true;
+    return true;
+  }
+  return true;
+}
+
+bool print_once_4 = false;
+void Logica_HV_Chile_V4() //MAQUINA 002
+{
+  /** Logica usada para a Harvester que encontraremos na Arauco Chile
+   *  Faz a leitura de 4 botões no joystick, e soma nos contadores 03 e 20.
+   *
+   * 
+   * CONFERINDO 
+   * Entrada 3 = Subir, gatilho de lo controle de ezquierda
+   * Entrada 1 = abrir garra, botão da direita do joystick da direita
+   * Entrada 4 = Fechar garra, botão da esquerda do joystick da direita
+   * Entrada 2 = Corte, gatilho da direita
+   * 
+   * Joystick da esquerda - Gatilho Sobe o cabeçote
+   * Joystick da direita- botao da esquerda fecha garra, da direita abre e o gatilho corta
+   * 
+   * Funcionamento do programa:
+   * 1 - Monitora a garra, até que ela seja pressionada
+   * 2 - Confere se o cabeçote estava  na vertical
+   * 3 - Aguarda até 10 segundos para apertar o botão de corte
+   * 4 - Aguarda até 10 segundos para apertar o botão de descer
+   * 5 - Aguarda até 10 segundos para apertar o botão de subir
+   * 6 - Se todos forem atendidos, gera um corte valido (+1 no contador 03)
+   */
+
+  print_once_4 = print_current_core(__func__, print_once_4);
+
+  int timeout_garra_max = 900000; // Salvo essas variaveis como INT para que se a função nunca for chamada, não ocupa memoria,  é menos eficiente que #define mas só seria definida nesse caso.
+  int timeout_corte_max = 900000; // timeouts so estao sendo usados para evitar travar pra sempre,
+  int timeout_solta_max = 900000; // mas podemos reduzir o numero e tornar esse valor util.
+  int timeout_garra = 0, timeout_corte = 0, timeout_solta = 0;
+  bool cancelar = false;
+
+  // ==================== 1 etapa - monitora o SOBE ====================
+  if (current_input_state[3] == 0) // Pressionou sobe?
+  {                                //\033[92mOK\033[0m
+    Smart_Print("\033[93mSTEP1 - Apertou SOBE\033[0m");
+    //  ==================== 2 etapa - Monitora a GARRA ====================
+    while (!(current_input_state[4] == 0 || cancelar == true))
+    {
+      timeout_garra++;
+      delay(1);
+      if (timeout_garra >= timeout_garra_max)
+      {
+        cancelar = true;
+        // Serial.println("\033[93mSTEP3: Demorou para pressionar Corte\033[0m");
+        Smart_Print("\033[93mSTEP2: Demorou para pressionar GARRA\033[0m");
+      }
+    }
+    if (cancelar == false)
+      Smart_Print("\033[93mSTEP2 - Apertou GARRA\033[0m");
+
+    // ==================== 3 etapa - Monitora CORTE  ====================
+    while (!(current_input_state[2] == 0 || cancelar == true))
+    {
+      timeout_corte++;
+      delay(1);
+      if (timeout_corte >= timeout_corte_max)
+      {
+        cancelar = true;
+        // Serial.println("\033[93mSTEP3: Demorou para pressionar descer\033[0m");
+        Smart_Print("\033[93mSTEP3: Demorou para pressionar CORTE\033[0m");
+      }
+    }
+    if (cancelar == false)
+      Smart_Print("\033[93mSTEP3 - Apertou CORTE\033[0m");
+
+    // ==================== 4 etapa - Espera pressionar o solta (IN4) ====================
+    while (!(current_input_state[1] == 0 || cancelar == true))
+    {
+      timeout_solta++;
+      delay(1);
+      if (timeout_solta >= timeout_solta_max)
+      {
+        cancelar = true;
+        // Serial.println("CANCELADO: Demorou para pressionar subir");
+        Smart_Print("\033[93mSTEP4: Demorou para pressionar SOLTA\033[0m");
+      }
+    }
+    if (cancelar == false)
+      Smart_Print("\033[93mSTEP4 - Apertou SOLTA\033[0m");
+    // ==================== 5 etapa - Sequencia de corte valida ====================
+
+    if (cancelar == false) // Verificação de motor ligado via FLAG
+    {
+      if (STATUS_Flag_Motor_Ligado == 1) // Flag 2 = flag do motor ligado
+      {
+        if (ADD_CT_VALUE(03, 1, MARTE_ID_ASCII) == true) // adiciona e confirma se deu certo
+        {
+          delay(delay_entre_mensagens);
+          set_flag(Flag_TTS_Eucalipto_Cortado, 1, MARTE_ID_ASCII); // usado para gerar evento de voz no celular
+          // Serial.println("\033[93mSTEP6 - Rotina de corte validada\033[0m");
+          Smart_Print("\033[92mSTEP5 - Rotina de corte validada\033[0m");
+
+          // play_valido();
+          esp_ipc_call(0, &buzzer_ok, (void *)0);
+        }
+      }
+      else if (STATUS_Flag_Motor_Ligado == 0)
+      {
+        ADD_CT_VALUE(03, 1, MARTE_ID_ASCII);
+        delay(delay_entre_mensagens);
+        ADD_CT_VALUE(20, 1, MARTE_ID_ASCII);
+        delay(delay_entre_mensagens);
+        set_flag(Flag_TTS_Eucalipto_Cortado, 1, MARTE_ID_ASCII);
+        // Serial.println("\033[91mSTEP6 - Corte valido, mas flag de motor desligado, CT20\033[0m");
+        Smart_Print("\033[93mSTEP5 - Corte valido, mas flag de motor desligado, CT20\033[0m");
+        // play_invalido();
+        esp_ipc_call(0, &buzzer_nok, (void *)0);
+      }
+      else if (STATUS_Flag_Motor_Ligado == -1)
+      {
+        ADD_CT_VALUE(03, 1, MARTE_ID_ASCII);
+        delay(delay_entre_mensagens);
+        ADD_CT_VALUE(20, 1, MARTE_ID_ASCII);
+        delay(delay_entre_mensagens);
+        set_flag(Flag_TTS_Eucalipto_Cortado, 1, MARTE_ID_ASCII);
+        delay(delay_entre_mensagens);
+        // Serial.println("\033[93mSTEP6 - ERRO GRAVE: Não foi possivel obter o status da FLAG de motor ligado\033[0m");
+        Smart_Print("\033[91mSTEP5 - ERRO GRAVE: Não foi possivel obter o status da FLAG de motor ligado\033[0m");
+
+        // play_invalido();
+        esp_ipc_call(0, &buzzer_nok, (void *)0);
+      }
+    }
+  } // nao estava na vertical
+}
+
+
+#ifdef MODO_TESTADOR
+
+#endif
+unsigned long last_screen_update = 0;
+void testador_de_input()
+{
+  pinMode(2, OUTPUT);
+  while(1)
+  {
+    for (size_t i = 1; i <= 5; i++)
+    {
+      if (current_input_state[i] == 0)
+      {
+        #ifdef SUPORTE_LCD_I2C_SSD1306
+        screen_DEBUG();
+        #endif
+        digitalWrite(2, HIGH);
+        esp_ipc_call(0, &buzzer_ok, (void *)0);
+        delay(200);
+      }
+      else
+      {
+      digitalWrite(2, LOW);
+      }
+    }
+  unsigned long call_millis = millis();
+  if (call_millis - last_screen_update >= 1000) 
+  {
+    #ifdef SUPORTE_LCD_I2C_SSD1306
+    screen_DEBUG();
+    #endif
+    last_screen_update = millis();
+  }
+}
+}
+
+unsigned int last_estado_motor = 0;
+void Logica_Verificar_motor()
+{
+  unsigned long currentMillis = millis();
+  if (currentMillis - last_estado_motor >= 5000)
+  {
+
+    if (Serial2InUse == false)
+    {
+     last_estado_motor = currentMillis;
+      Serial2InUse = true;
+      STATUS_Flag_Motor_Ligado = check_flag(FLAG_Motor_Ligado, MARTE_ID_ASCII);
+      //Smart_Print("FLAG DO MOTOR =");
+      //Smart_Print(STATUS_Flag_Motor_Ligado);
+      // if (STATUS_Flag_Motor_Ligado == 1)
+      // {
+      //   vTaskDelay(60000 / portTICK_PERIOD_MS);
+      // }
+      // else
+      // {
+      //   vTaskDelay(30000 / portTICK_PERIOD_MS); // consulta mais rapido para nao perder cortes
+      // }
+      Serial2InUse = false;
+    }
+    else
+    {
+      last_estado_motor = currentMillis;
+      Serial.println("ALGUEM ESQUECEU O SERIAL LIGADO");
+    }
+  }
+}
+
+void loop(void) // sempre será atribuído ao core 1 automaticamente pelo sistema, com prioridade 1
+{
+  if (updating == false) //previne execução de código que possa conflitar com o update via OTA
+  {
+    //testador_de_input(); //Desligue ao utilizar o programa normal
+    Logica_Verificar_motor(); // Tive que por dentro do core1 para testar se para de travar, PRECISA ENTENDER MOTIVO
+    Logica_HV_Chile_V4();
+
+  }
+
+  // if (wait_for_signal(1, 5000, true) == 1)
+  // {
+  //   Serial.println("DEU");
+  // }
+  // else
+  // {
+  //   Serial.println("numDEU");
+  // }
+  
+  server.handleClient();
+  delay(5);
+}
+
+/* #region  Codigo obsoleto - so pra referencia */
+
+// #ifdef TEST_INPUTS
+//   if (current_input_state[1] == 0 || current_input_state[2] == 0 || current_input_state[3] == 0 || current_input_state[4] == 0 || current_input_state[5] == 0)
+//   {
+//     play_valido();
+//   }
+// #endif
+// #ifndef TEST_INPUTS
+//   Logica_HV_Chile_V1();
+//   vTaskDelay(5 / portTICK_PERIOD_MS);
+// #endif
+//   // delay(2000);
+//   // CT03_VALUE++;
+//   // SET_CT_VALUE(03, CT03_VALUE, MARTE_ID_ASCII);
+
+//   if (current_input_state[5] == 0)
+//   {
+//     // https://github.com/robsoncouto/arduino-songs
+//     // play_valido();
+//     // supermario();
+//     // tetris();
+//     // esp_ipc_call(uint32_t cpu_id, esp_ipc_func_t func, void* arg)
+//     // esp_err_t ret = esp_ipc_call(other_cpuid, &spi_flash_op_block_func, (void*) other_cpuid);
+//     int a = 0;
+//     esp_ipc_call(0, &buzzer_ok, (void *)0); // Inicia o som em uma TASK no core 0
+//                                             // delay(300);
+//     vTaskDelay(300 / portTICK_PERIOD_MS);
+//     // execute(printe);
+//   }
+/* #endregion */
