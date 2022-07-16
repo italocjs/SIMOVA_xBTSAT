@@ -1,0 +1,15 @@
+Logica da Feller buncher MS
+
+->  Como a maquina funciona:
+    1 -> Abrir o braço de baixo
+    2 -> Encaixar na arvore
+    3 -> Fechar o braço de baixo (rapido senao a arvore cai)
+    4 -> Abrir e fechar o braço de cima rapido  (um botão abre, outro fecha)
+    5 -> Abre o braço de baixo e repete o ciclo até encher o acumulador
+    6 -> Acumulador cheio: operador aperta um botão para tombar as arvores
+
+Inputs que podemos pegar:
+    -> Joystick - Abre garra menor
+    -> Joystick - Fecha garra menor
+    -> Joystick - Abre garra maior
+    -> Joystick - Fecha garra maior
